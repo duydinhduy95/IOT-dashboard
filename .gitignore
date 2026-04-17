@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+backend/node_modules/
+
+# Production
+frontend/dist/
+
+# Env & Secrets
+.env
+backend/.env
+
+# Local Data
+backend/data.json
+*.log
+
+# Misc
+.DS_Store
+.vscode/
+.idea/
