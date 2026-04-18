@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -33,17 +33,63 @@ export default function WaveformChart() {
     const [selectedColumn, setSelectedColumn] = useState(0);
     const [chartData, setChartData] = useState(null);
     const [loading, setLoading] = useState(false);
+    const [pushing, setPushing] = useState(false);
+    const [isLive, setIsLive] = useState(false);
     const [error, setError] = useState('');
 
-    const updateChartDisplay = (columnsData, colIdx) => {
-        if (!columnsData || columnsData.length === 0) return;
+    // Effect to update chart when allColumns or selectedColumn changes
+    useEffect(() => {
+        if (allColumns[selectedColumn]) {
+            updateChartDisplay(allColumns, selectedColumn);
+        }
+    }, [allColumns, selectedColumn]);
 
-        const rowCount = columnsData[0].length;
+    // SSE Connection for Live Data
+    useEffect(() => {
+        const eventSource = new EventSource('http://localhost:3001/api/waveform-stream');
+
+        eventSource.onopen = () => {
+            console.log("SSE Connection opened");
+            setIsLive(true);
+        };
+
+        eventSource.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                if (data.waveform && Array.isArray(data.waveform)) {
+                    const sensorIdx = (data.sensorId || 1) - 1;
+                    setAllColumns(prev => {
+                        const newCols = [...prev];
+                        newCols[sensorIdx] = data.waveform;
+                        return newCols;
+                    });
+                }
+            } catch (err) {
+                console.error("Error parsing SSE data:", err);
+            }
+        };
+
+        eventSource.onerror = (e) => {
+            console.error("SSE Connection error:", e);
+            setIsLive(false);
+            eventSource.close();
+        };
+
+        return () => {
+            eventSource.close();
+        };
+    }, [selectedColumn]); // Re-bind if selection logic needs it, though setAllColumns handles internal logic
+
+    const updateChartDisplay = (columnsData, colIdx) => {
+        if (!columnsData || !columnsData[colIdx]) return;
+
+        const data = columnsData[colIdx];
+        const rowCount = data.length;
         const labels = Array.from({ length: rowCount }, (_, i) => i);
         
         const datasets = [{
             label: `Sensor ${colIdx + 1}`,
-            data: columnsData[colIdx],
+            data: data,
             borderColor: COLORS[colIdx % COLORS.length],
             backgroundColor: COLORS[colIdx % COLORS.length] + '80',
             borderWidth: 1.5,
@@ -124,6 +170,40 @@ export default function WaveformChart() {
         updateChartDisplay(allColumns, idx);
     };
 
+    const handlePushToServer = async () => {
+        if (!allColumns || allColumns.length === 0) return;
+        
+        setPushing(true);
+        setError('');
+        
+        try {
+            const dataToPush = {
+                sensorId: selectedColumn + 1,
+                waveform: allColumns[selectedColumn]
+            };
+            
+            const response = await fetch('http://localhost:3001/api/simulate-data', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(dataToPush),
+            });
+            
+            const result = await response.json();
+            if (result.success) {
+                alert(`Successfully pushed ${allColumns[selectedColumn].length} points to server! Check backend terminal.`);
+            } else {
+                throw new Error(result.message || 'Server error');
+            }
+        } catch (err) {
+            console.error("Error pushing to server:", err);
+            setError('Failed to push data: ' + err.message);
+        } finally {
+            setPushing(false);
+        }
+    };
+
     const options = {
         responsive: true,
         maintainAspectRatio: false,
@@ -171,7 +251,23 @@ export default function WaveformChart() {
         <div className="glass-panel" style={{ marginTop: '24px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '16px' }}>
                 <h2 style={{ fontSize: '20px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <Activity size={20} color="var(--accent-color)" /> Sensor Waveform (Column-based)
+                    <Activity size={20} color="var(--accent-color)" /> Sensor Waveform (Live MQTT)
+                    {isLive && (
+                        <span style={{ 
+                            fontSize: '10px', 
+                            background: '#28a745', 
+                            color: 'white', 
+                            padding: '2px 8px', 
+                            borderRadius: '10px', 
+                            marginLeft: '8px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '4px'
+                        }}>
+                           <span style={{ width: '6px', height: '6px', backgroundColor: 'white', borderRadius: '50%', display: 'inline-block' }}></span>
+                           LIVE
+                        </span>
+                    )}
                 </h2>
                 <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
                     {allColumns.length > 0 && (
@@ -196,18 +292,6 @@ export default function WaveformChart() {
                             </select>
                         </div>
                     )}
-                    <input 
-                        type="file" 
-                        onChange={handleFileUpload} 
-                        style={{
-                            background: 'rgba(255, 255, 255, 0.1)',
-                            border: '1px solid rgba(255, 255, 255, 0.2)',
-                            color: 'var(--text-primary)',
-                            padding: '8px',
-                            borderRadius: '8px',
-                            cursor: 'pointer'
-                        }}
-                    />
                 </div>
             </div>
 
@@ -216,13 +300,13 @@ export default function WaveformChart() {
             )}
 
             {loading && (
-                <div style={{ color: 'var(--text-secondary)', padding: '10px 0' }}>Parsing data and rendering chart...</div>
+                <div style={{ color: 'var(--text-secondary)', padding: '10px 0' }}>Processing data...</div>
             )}
 
             <div style={{ width: '100%', height: '400px', backgroundColor: 'rgba(0,0,0,0.2)', borderRadius: '8px', padding: '16px' }}>
                 {!chartData && !loading && !error && (
                     <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-secondary)' }}>
-                        Upload a text file containing matrix data to preview bearing sensor waveforms.
+                        Waiting for live waveform data from MQTT...
                     </div>
                 )}
                 {chartData && (

@@ -22,8 +22,29 @@ export default function Dashboard() {
         };
 
         fetchData();
-        const interval = setInterval(fetchData, 5000); // refresh every 5 seconds
-        return () => clearInterval(interval);
+
+        // Listen for real-time status updates via SSE
+        const eventSource = new EventSource(`${API_URL}/api/waveform-stream`);
+        
+        eventSource.onmessage = (event) => {
+            try {
+                const update = JSON.parse(event.data);
+                if (update.type === 'status') {
+                    setData(prev => ({
+                        ...prev,
+                        inputSignal: update.inputSignal,
+                        remainingDays: update.remainingDays,
+                        logs: update.logs || prev.logs // Update logs too!
+                    }));
+                }
+            } catch (err) {
+                console.error("Error parsing SSE status update:", err);
+            }
+        };
+
+        return () => {
+            eventSource.close();
+        };
     }, []);
 
     const getLogIcon = (type) => {
@@ -45,38 +66,9 @@ export default function Dashboard() {
                 <p style={{ color: 'var(--text-secondary)' }}>Real-time system data from MQTT</p>
             </div>
 
-            <div className="grid-container">
-                {/* Input Signal Card */}
-                <div className="glass-panel stat-card">
-                    <div className="stat-icon">
-                        <Radio color="var(--accent-color)" size={32} />
-                    </div>
-                    <div className="stat-info">
-                        <h3>Input Signal (Tín hiệu đầu vào)</h3>
-                        <div>
-                            <span className="stat-value">{data.inputSignal}</span>
-                        </div>
-                    </div>
-                </div>
-
-                {/* Remaining Days Card */}
-                <div className="glass-panel stat-card">
-                    <div className="stat-icon">
-                        <CalendarDays color="var(--success)" size={32} />
-                    </div>
-                    <div className="stat-info">
-                        <h3>Remaining Days (Số ngày còn lại)</h3>
-                        <div>
-                            <span className="stat-value">{data.remainingDays}</span>
-                            <span className="stat-unit">days</span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
             <div className="glass-panel">
                 <h2 style={{ fontSize: '20px', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <ActivityLogIcon /> Alert Log (Ổ log cảnh báo)
+                    <ActivityLogIcon /> Alert Log
                 </h2>
                 {data.logs.length === 0 ? (
                     <p style={{ color: 'var(--text-secondary)' }}>No logs recorded yet.</p>
@@ -96,6 +88,22 @@ export default function Dashboard() {
             </div>
 
             <WaveformChart />
+
+            <div className="grid-container" style={{ marginTop: '24px' }}>
+                {/* Remaining Days Card */}
+                <div className="glass-panel stat-card">
+                    <div className="stat-icon">
+                        <CalendarDays color="var(--success)" size={32} />
+                    </div>
+                    <div className="stat-info">
+                        <h3>Remaining Days (Số ngày còn lại)</h3>
+                        <div>
+                            <span className="stat-value">{data.remainingDays}</span>
+                            <span className="stat-unit">days</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
     );
 }

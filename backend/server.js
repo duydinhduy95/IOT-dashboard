@@ -10,7 +10,11 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
+// For Real-time Waveform Streaming (SSE)
+let sseClients = [];
 
 // Persistent state
 const DATA_FILE = path.join(__dirname, 'data.json');
@@ -24,6 +28,9 @@ let appData = {
     },
     lastExecution: 0
 };
+
+// In-memory storage for latest waveforms (not saved to data.json to keep it small)
+let lastWaveforms = {};
 
 // Load initial data if exists
 if (fs.existsSync(DATA_FILE)) {
@@ -113,6 +120,49 @@ mqttClient.on('message', (topic, message) => {
             }
             if (changed) {
                 saveData();
+                // Broadcast status update to all SSE clients
+                const statusData = JSON.stringify({
+                    type: 'status',
+                    inputSignal: appData.inputSignal,
+                    remainingDays: appData.remainingDays
+                });
+                sseClients.forEach(client => {
+                    client.write(`data: ${statusData}\n\n`);
+                });
+            }
+
+            // New: Handle Waveform data from MQTT
+            if (payload.waveform && Array.isArray(payload.waveform)) {
+                console.log(`[MQTT] Received Waveform for Sensor ${payload.sensorId || 'Unknown'}: ${payload.waveform.length} points.`);
+                
+                const sensorId = payload.sensorId || 1;
+                // ONLY store if waveform actually exists in this message
+                lastWaveforms[sensorId] = payload.waveform;
+
+                // Broadcast to all connected SSE clients
+                const sseData = JSON.stringify({
+                    sensorId: sensorId,
+                    waveform: payload.waveform
+                });
+                
+                sseClients.forEach(client => {
+                    client.write(`data: ${sseData}\n\n`);
+                });
+
+                if (payload.waveform.length > 0) {
+                    console.log(`Sample data sent to ${sseClients.length} clients.`);
+                }
+            } else if (payload.inputSignal !== undefined || payload.remainingDays !== undefined) {
+                // If it's just a status update, broadcast the latest status and logs
+                const statusData = JSON.stringify({
+                    type: 'status',
+                    inputSignal: appData.inputSignal,
+                    remainingDays: appData.remainingDays,
+                    logs: appData.logs // Include logs so UI updates them too
+                });
+                sseClients.forEach(client => {
+                    client.write(`data: ${statusData}\n\n`);
+                });
             }
         } catch (err) {
             console.error("Failed to parse MQTT message", err);
@@ -132,6 +182,44 @@ app.get('/api/settings', (req, res) => {
     res.json(appData.settings);
 });
 
+// SSE Endpoint for Waveform Stream
+app.get('/api/waveform-stream', (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+
+    const clientId = Date.now();
+    const newClient = {
+        id: clientId,
+        write: (data) => res.write(data)
+    };
+    sseClients.push(newClient);
+    console.log(`[SSE] Client connected: ${clientId}. Total clients: ${sseClients.length}`);
+
+    // Immediately send the current status to the new client
+    const initialStatus = JSON.stringify({
+        type: 'status',
+        inputSignal: appData.inputSignal,
+        remainingDays: appData.remainingDays
+    });
+    newClient.write(`data: ${initialStatus}\n\n`);
+
+    // Immediately send the latest data for all sensors to the new client
+    Object.keys(lastWaveforms).forEach(sensorId => {
+        const sseData = JSON.stringify({
+            sensorId: parseInt(sensorId),
+            waveform: lastWaveforms[sensorId]
+        });
+        newClient.write(`data: ${sseData}\n\n`);
+    });
+
+    req.on('close', () => {
+        sseClients = sseClients.filter(c => c.id !== clientId);
+        console.log(`[SSE] Client disconnected: ${clientId}. Total clients: ${sseClients.length}`);
+    });
+});
+
 app.post('/api/settings', (req, res) => {
     const { alertDaysThreshold, frequencyHours } = req.body;
     if (typeof alertDaysThreshold === 'number') {
@@ -149,6 +237,40 @@ app.delete('/api/logs', (req, res) => {
     appData.logs = [];
     saveData();
     res.json({ success: true });
+});
+
+// New: API to simulate data coming from a sensor (Frontend -> Backend)
+app.post('/api/simulate-data', (req, res) => {
+    const { sensorId, waveform, inputSignal, remainingDays } = req.body;
+    
+    console.log('--- SIMULATED DATA RECEIVED FROM FRONTEND ---');
+    if (sensorId) console.log(`Sensor ID: ${sensorId}`);
+    
+    const mqttPayload = {};
+    if (sensorId) mqttPayload.sensorId = sensorId;
+    if (waveform) mqttPayload.waveform = waveform;
+    if (inputSignal !== undefined) mqttPayload.inputSignal = inputSignal;
+    if (remainingDays !== undefined) mqttPayload.remainingDays = remainingDays;
+
+    if (Object.keys(mqttPayload).length === 0) {
+        return res.status(400).json({ success: false, message: 'No valid data provided' });
+    }
+
+    // Publish to the MQTT broker
+    mqttClient.publish(mqttTopic, JSON.stringify(mqttPayload));
+    
+    if (waveform) {
+        console.log(`Waveform: ${waveform.length} data points.`);
+    }
+    if (inputSignal !== undefined) console.log(`Input Signal: ${inputSignal}`);
+    if (remainingDays !== undefined) console.log(`Remaining Days: ${remainingDays}`);
+    
+    res.json({ 
+        success: true, 
+        message: 'Data published to MQTT',
+        dataSent: mqttPayload
+    });
+    console.log('---------------------------------------------');
 });
 
 // Periodic logic for alerting
